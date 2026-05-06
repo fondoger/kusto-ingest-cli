@@ -43,8 +43,9 @@ func (t KustoType) String() string {
 }
 
 type Schema struct {
-	Columns []string
-	Types   []KustoType
+	Columns  []string
+	Types    []KustoType
+	RowCount int64 // total data rows (excludes header)
 }
 
 func DelimiterFor(path string) rune {
@@ -193,7 +194,7 @@ func Infer(path string, inferRows int) (*Schema, error) {
 		}
 		types[i] = picked
 	}
-	return &Schema{Columns: cols, Types: types}, nil
+	return &Schema{Columns: cols, Types: types, RowCount: totalRows}, nil
 }
 
 func filterCandidates(cands []KustoType, val string, sawBoolLit *bool) []KustoType {

@@ -31,6 +31,9 @@ type Options struct {
 	Append    bool
 	InferRows int
 	Quiet     bool // suppress progress bar (non-interactive environments)
+	// Optional milestone callbacks for real-time progress reporting in quiet mode.
+	OnSchemaReady func(rows int64, cols int)
+	OnTableReady  func(table string)
 }
 
 func IngestFile(client *kusto.Client, path, table string, opts Options) Result {
@@ -42,6 +45,9 @@ func IngestFile(client *kusto.Client, path, table string, opts Options) Result {
 		res.Err = fmt.Errorf("infer schema: %w", err)
 		return res
 	}
+	if opts.OnSchemaReady != nil {
+		opts.OnSchemaReady(sch.RowCount, len(sch.Columns))
+	}
 
 	if err := ensureTable(client, table, sch, opts); err != nil {
 		res.Err = err
@@ -51,6 +57,9 @@ func IngestFile(client *kusto.Client, path, table string, opts Options) Result {
 	if err := ensureMapping(client, table, mappingName, sch); err != nil {
 		res.Err = err
 		return res
+	}
+	if opts.OnTableReady != nil {
+		opts.OnTableReady(table)
 	}
 
 	rows, bytes, err := streamUpload(client, path, table, mappingName, sch, opts)

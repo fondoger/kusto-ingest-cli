@@ -101,82 +101,93 @@ func run(cmd *cobra.Command, args []string) error {
 
 	interactive := isInteractive()
 	if !interactive {
-		fmt.Fprintln(os.Stderr, "Non-interactive environment detected — using simplified output (no progress bar, summary only).")
+		fmt.Fprintln(os.Stderr, "Non-interactive environment detected — using simplified output (no progress bar).")
 	}
 
-	type fileResult struct {
-		path  string
-		table string
-		res   ingest.Result
+	displayName := makeDisplayName(path, info.IsDir())
+
+	successes, failed := 0, 0
+	type failure struct {
+		path string
+		err  error
 	}
-	results := make([]fileResult, 0, len(files))
+	var failures []failure
 
 	for i, fp := range files {
 		table := flagTable
 		if table == "" {
 			table = defaultTableName(fp)
 		}
+		dn := displayName(fp)
 		if interactive {
-			fmt.Fprintf(os.Stderr, "[%d/%d] uploading %s -> %s\n", i+1, len(files), fp, table)
+			fmt.Fprintf(os.Stderr, "[%d/%d] uploading %s -> %s\n", i+1, len(files), dn, table)
+		} else {
+			fmt.Fprintf(os.Stderr, "[%d/%d] %s\n", i+1, len(files), dn)
 		}
-		res := ingest.IngestFile(client, fp, table, ingest.Options{
+
+		opts := ingest.Options{
 			Force:     flagForce,
 			Append:    flagAppend,
 			InferRows: flagInferRows,
 			Quiet:     !interactive,
-		})
-		results = append(results, fileResult{fp, table, res})
-		if interactive {
-			if res.Err != nil {
-				fmt.Fprintf(os.Stderr, "  FAIL %s: %s\n", fp, firstLine(res.Err.Error()))
-			} else {
-				fmt.Fprintf(os.Stderr, "  OK   %s  table=%s  rows=%d  %s  in %s\n",
-					fp, res.Table, res.Rows, humanBytes(res.Bytes), res.Duration.Round(100*time.Millisecond))
+		}
+		if !interactive {
+			opts.OnSchemaReady = func(rows int64, cols int) {
+				fmt.Fprintf(os.Stderr, "      %d rows, %d cols\n", rows, cols)
+			}
+			opts.OnTableReady = func(table string) {
+				fmt.Fprintf(os.Stderr, "      → %s\n", table)
 			}
 		}
-	}
-
-	successes, failed := 0, 0
-	for _, r := range results {
-		if r.res.Err != nil {
+		res := ingest.IngestFile(client, fp, table, opts)
+		if res.Err != nil {
 			failed++
+			failures = append(failures, failure{fp, res.Err})
+			if interactive {
+				fmt.Fprintf(os.Stderr, "  FAIL %s: %s\n", dn, firstLine(res.Err.Error()))
+			} else {
+				fmt.Fprintf(os.Stderr, "      FAIL: %s\n", firstLine(res.Err.Error()))
+			}
+			continue
+		}
+		successes++
+		if interactive {
+			fmt.Fprintf(os.Stderr, "  OK   %s  table=%s  rows=%d  %s  in %s\n",
+				dn, res.Table, res.Rows, humanBytes(res.Bytes), res.Duration.Round(100*time.Millisecond))
 		} else {
-			successes++
+			fmt.Fprintf(os.Stderr, "      OK in %s\n", res.Duration.Round(100*time.Millisecond))
 		}
 	}
 
-	if interactive {
-		fmt.Fprintf(os.Stderr, "\nDone. %d succeeded, %d failed.\n", successes, failed)
-		if failed > 0 {
-			fmt.Fprintln(os.Stderr, "Failed:")
-			for _, r := range results {
-				if r.res.Err != nil {
-					fmt.Fprintf(os.Stderr, "  %s: %s\n", r.path, firstLine(r.res.Err.Error()))
-				}
-			}
-		}
-	} else {
-		fmt.Println("filename|table|status")
-		for _, r := range results {
-			status := ""
-			if r.res.Err != nil {
-				status = "FAIL: " + firstLine(r.res.Err.Error())
-			} else {
-				status = fmt.Sprintf("OK rows=%d in %s", r.res.Rows, r.res.Duration.Round(100*time.Millisecond))
-			}
-			fmt.Printf("%s|%s|%s\n", r.path, r.table, status)
-		}
-		fmt.Fprintf(os.Stderr, "\n%d succeeded, %d failed.\n", successes, failed)
-	}
+	fmt.Fprintf(os.Stderr, "\nDone. %d succeeded, %d failed.\n", successes, failed)
 	if failed > 0 {
+		fmt.Fprintln(os.Stderr, "Failed:")
+		for _, f := range failures {
+			fmt.Fprintf(os.Stderr, "  %s: %s\n", displayName(f.path), firstLine(f.err.Error()))
+		}
 		os.Exit(1)
 	}
 	return nil
 }
 
+// makeDisplayName returns a function that formats a file path for output.
+// Single-file mode shows just the basename; directory mode shows the path
+// relative to the input directory (with forward slashes).
+func makeDisplayName(inputPath string, isDir bool) func(string) string {
+	if !isDir {
+		return func(fp string) string { return filepath.Base(fp) }
+	}
+	return func(fp string) string {
+		if rel, err := filepath.Rel(inputPath, fp); err == nil {
+			return filepath.ToSlash(rel)
+		}
+		return filepath.Base(fp)
+	}
+}
+
 // isInteractive reports whether stderr is a terminal (where the progress bar
 // renders correctly). In CI, redirected pipes, or background runs it returns
-// false, and we use a simplified table-only summary.
+// false, and we use simplified line-oriented output instead.
 func isInteractive() bool {
 	fi, err := os.Stderr.Stat()
 	if err != nil {
