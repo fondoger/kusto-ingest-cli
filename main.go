@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -98,43 +99,90 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 	client := kusto.New(flagCluster, flagDatabase, tok)
 
-	type failure struct {
-		path string
-		err  error
+	interactive := isInteractive()
+	if !interactive {
+		fmt.Fprintln(os.Stderr, "Non-interactive environment detected — using simplified output (no progress bar, summary only).")
 	}
-	var failures []failure
-	successes := 0
+
+	type fileResult struct {
+		path  string
+		table string
+		res   ingest.Result
+	}
+	results := make([]fileResult, 0, len(files))
 
 	for i, fp := range files {
 		table := flagTable
 		if table == "" {
 			table = defaultTableName(fp)
 		}
-		fmt.Fprintf(os.Stderr, "[%d/%d] uploading %s -> %s\n", i+1, len(files), fp, table)
+		if interactive {
+			fmt.Fprintf(os.Stderr, "[%d/%d] uploading %s -> %s\n", i+1, len(files), fp, table)
+		}
 		res := ingest.IngestFile(client, fp, table, ingest.Options{
 			Force:     flagForce,
 			Append:    flagAppend,
 			InferRows: flagInferRows,
+			Quiet:     !interactive,
 		})
-		if res.Err != nil {
-			fmt.Fprintf(os.Stderr, "  FAIL %s: %s\n", fp, firstLine(res.Err.Error()))
-			failures = append(failures, failure{fp, res.Err})
-			continue
+		results = append(results, fileResult{fp, table, res})
+		if interactive {
+			if res.Err != nil {
+				fmt.Fprintf(os.Stderr, "  FAIL %s: %s\n", fp, firstLine(res.Err.Error()))
+			} else {
+				fmt.Fprintf(os.Stderr, "  OK   %s  table=%s  rows=%d  %s  in %s\n",
+					fp, res.Table, res.Rows, humanBytes(res.Bytes), res.Duration.Round(100*time.Millisecond))
+			}
 		}
-		successes++
-		fmt.Fprintf(os.Stderr, "  OK   %s  table=%s  rows=%d  %s  in %s\n",
-			fp, res.Table, res.Rows, humanBytes(res.Bytes), res.Duration.Round(100*1000*1000))
 	}
 
-	fmt.Fprintf(os.Stderr, "\nDone. %d succeeded, %d failed.\n", successes, len(failures))
-	if len(failures) > 0 {
-		fmt.Fprintln(os.Stderr, "Failed:")
-		for _, f := range failures {
-			fmt.Fprintf(os.Stderr, "  %s: %s\n", f.path, firstLine(f.err.Error()))
+	successes, failed := 0, 0
+	for _, r := range results {
+		if r.res.Err != nil {
+			failed++
+		} else {
+			successes++
 		}
+	}
+
+	if interactive {
+		fmt.Fprintf(os.Stderr, "\nDone. %d succeeded, %d failed.\n", successes, failed)
+		if failed > 0 {
+			fmt.Fprintln(os.Stderr, "Failed:")
+			for _, r := range results {
+				if r.res.Err != nil {
+					fmt.Fprintf(os.Stderr, "  %s: %s\n", r.path, firstLine(r.res.Err.Error()))
+				}
+			}
+		}
+	} else {
+		fmt.Println("filename|table|status")
+		for _, r := range results {
+			status := ""
+			if r.res.Err != nil {
+				status = "FAIL: " + firstLine(r.res.Err.Error())
+			} else {
+				status = fmt.Sprintf("OK rows=%d in %s", r.res.Rows, r.res.Duration.Round(100*time.Millisecond))
+			}
+			fmt.Printf("%s|%s|%s\n", r.path, r.table, status)
+		}
+		fmt.Fprintf(os.Stderr, "\n%d succeeded, %d failed.\n", successes, failed)
+	}
+	if failed > 0 {
 		os.Exit(1)
 	}
 	return nil
+}
+
+// isInteractive reports whether stderr is a terminal (where the progress bar
+// renders correctly). In CI, redirected pipes, or background runs it returns
+// false, and we use a simplified table-only summary.
+func isInteractive() bool {
+	fi, err := os.Stderr.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
 }
 
 func collectFiles(path string, info fs.FileInfo, recursive bool) ([]string, error) {

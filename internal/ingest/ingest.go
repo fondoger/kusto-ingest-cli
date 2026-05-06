@@ -30,6 +30,7 @@ type Options struct {
 	Force     bool
 	Append    bool
 	InferRows int
+	Quiet     bool // suppress progress bar (non-interactive environments)
 }
 
 func IngestFile(client *kusto.Client, path, table string, opts Options) Result {
@@ -162,14 +163,17 @@ func streamUpload(c *kusto.Client, path, table, mappingName string, sch *schema.
 	}
 	totalSize := fi.Size()
 
-	bar := progressbar.NewOptions64(totalSize,
-		progressbar.OptionSetDescription(fmt.Sprintf("  %s", baseName(path))),
-		progressbar.OptionShowBytes(true),
-		progressbar.OptionShowCount(),
-		progressbar.OptionSetWidth(20),
-		progressbar.OptionThrottle(100*time.Millisecond),
-		progressbar.OptionOnCompletion(func() { fmt.Fprint(os.Stderr, "\n") }),
-	)
+	var bar *progressbar.ProgressBar
+	if !opts.Quiet {
+		bar = progressbar.NewOptions64(totalSize,
+			progressbar.OptionSetDescription(fmt.Sprintf("  %s", baseName(path))),
+			progressbar.OptionShowBytes(true),
+			progressbar.OptionShowCount(),
+			progressbar.OptionSetWidth(20),
+			progressbar.OptionThrottle(100*time.Millisecond),
+			progressbar.OptionOnCompletion(func() { fmt.Fprint(os.Stderr, "\n") }),
+		)
+	}
 
 	f, err := os.Open(path)
 	if err != nil {
@@ -215,7 +219,9 @@ func streamUpload(c *kusto.Client, path, table, mappingName string, sch *schema.
 		if off, err := f.Seek(0, io.SeekCurrent); err == nil {
 			delta := off - lastOffset
 			if delta > 0 {
-				_ = bar.Add64(delta)
+				if bar != nil {
+					_ = bar.Add64(delta)
+				}
 				lastOffset = off
 			}
 		}
@@ -224,7 +230,9 @@ func streamUpload(c *kusto.Client, path, table, mappingName string, sch *schema.
 		return rowCount, byteCount, err
 	}
 	byteCount = lastOffset
-	_ = bar.Finish()
+	if bar != nil {
+		_ = bar.Finish()
+	}
 	return rowCount, byteCount, nil
 }
 
