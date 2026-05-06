@@ -4,6 +4,8 @@ A small CLI for ingesting CSV/TSV files into Azure Data Explorer (Kusto) via the
 
 It infers the schema, creates the target table and JSON ingestion mapping for you, and uploads the data.
 
+> **Just want to run KQL queries?** This tool only does ingestion. For running queries against Kusto, see [danielsada/go-kusto-cli](https://github.com/danielsada/go-kusto-cli).
+
 ## Features
 
 - Single file, a directory, or a directory tree (`-r`)
@@ -24,15 +26,13 @@ go install github.com/fondoger/kusto-ingest-cli@latest
 
 This installs the `kusto-ingest-cli` binary into your `$GOPATH/bin` (or `$GOBIN`).
 
-> **Just want to run KQL queries?** This tool only does ingestion. For running queries against Kusto, see [danielsada/go-kusto-cli](https://github.com/danielsada/go-kusto-cli).
-
 ## Authentication
 
 ```bash
 az login
 ```
 
-The CLI calls `az account get-access-token` under the hood to obtain a token for `https://api.kusto.windows.net`. Make sure your account has ingest permissions on the target database.
+The CLI calls `az account get-access-token` under the hood to obtain access tokens. Make sure your account has ingest permissions on the target database.
 
 ## Usage
 
