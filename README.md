@@ -2,7 +2,7 @@
 
 A small CLI for ingesting CSV/TSV files into Azure Data Explorer (Kusto) via the Streaming Ingest REST API.
 
-It infers the schema, creates the target table and JSON ingestion mapping for you, and uploads the data — no Kusto setup required beyond having a database you can write to.
+It infers the schema, creates the target table and JSON ingestion mapping for you, and uploads the data.
 
 ## Features
 
@@ -11,7 +11,6 @@ It infers the schema, creates the target table and JSON ingestion mapping for yo
 - Auto-creates table and JSON ingestion mapping
 - Auto-derives table names from filenames, sanitized to valid Kusto identifiers
 - Three modes for existing tables: error (default), append, or force-recreate
-- Auto-enables the streaming ingestion policy on first use (database-level, with table-level fallback in append mode)
 - Streaming upload in 4 MiB batches with a progress bar
 - Authenticates via your existing `az login` session
 
@@ -54,29 +53,25 @@ kusto-ingest-cli --cluster mycluster.kusto.windows.net --database MyDB ./events.
 Ingest a single file into a specific table:
 
 ```bash
-kusto-ingest-cli --cluster mycluster.kusto.windows.net --database MyDB \
-  --table Events ./events.csv
+kusto-ingest-cli --cluster mycluster.kusto.windows.net --database MyDB --table Events ./events.csv
 ```
 
 Ingest every CSV/TSV in a directory tree, appending to existing tables:
 
 ```bash
-kusto-ingest-cli --cluster mycluster.kusto.windows.net --database MyDB \
-  -r --append ./data/
+kusto-ingest-cli --cluster mycluster.kusto.windows.net --database MyDB -r --append ./data/
 ```
 
 Ingest a directory and prefix every auto-derived table name with `raw_`:
 
 ```bash
-kusto-ingest-cli --cluster mycluster.kusto.windows.net --database MyDB \
-  -r --table-prefix raw_ ./data/
+kusto-ingest-cli --cluster mycluster.kusto.windows.net --database MyDB -r --table-prefix raw_ ./data/
 ```
 
 Drop and recreate a table from scratch (destroys existing data):
 
 ```bash
-kusto-ingest-cli --cluster mycluster.kusto.windows.net --database MyDB \
-  --force ./events.csv
+kusto-ingest-cli --cluster mycluster.kusto.windows.net --database MyDB --force ./events.csv
 ```
 
 ### Flags

@@ -59,20 +59,16 @@ kusto-ingest-cli [flags] <path>
 kusto-ingest-cli --cluster mycluster.kusto.windows.net --database MyDB ./events.csv
 
 # Single file into a specific table
-kusto-ingest-cli --cluster mycluster.kusto.windows.net --database MyDB \
-  --table Events ./events.csv
+kusto-ingest-cli --cluster mycluster.kusto.windows.net --database MyDB --table Events ./events.csv
 
 # Recurse a directory tree, append to existing tables
-kusto-ingest-cli --cluster mycluster.kusto.windows.net --database MyDB \
-  -r --append ./data/
+kusto-ingest-cli --cluster mycluster.kusto.windows.net --database MyDB -r --append ./data/
 
 # Recurse with a name prefix on every auto-derived table
-kusto-ingest-cli --cluster mycluster.kusto.windows.net --database MyDB \
-  -r --table-prefix raw_ ./data/
+kusto-ingest-cli --cluster mycluster.kusto.windows.net --database MyDB -r --table-prefix raw_ ./data/
 
 # Drop and recreate a table from scratch (destroys existing data)
-kusto-ingest-cli --cluster mycluster.kusto.windows.net --database MyDB \
-  --force ./events.csv
+kusto-ingest-cli --cluster mycluster.kusto.windows.net --database MyDB --force ./events.csv
 
 # Use environment variables instead of repeating cluster/db flags
 export KUSTO_INGEST_CLUSTER=mycluster.kusto.windows.net
