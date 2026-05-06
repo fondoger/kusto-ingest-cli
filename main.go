@@ -51,17 +51,30 @@ func main() {
 }
 
 func run(cmd *cobra.Command, args []string) error {
+	clusterFromEnv, dbFromEnv := false, false
 	if flagCluster == "" {
-		flagCluster = os.Getenv("KUSTO_INGEST_CLUSTER")
+		if v := os.Getenv("KUSTO_INGEST_CLUSTER"); v != "" {
+			flagCluster = v
+			clusterFromEnv = true
+		}
 	}
 	if flagDatabase == "" {
-		flagDatabase = os.Getenv("KUSTO_INGEST_DATABASE")
+		if v := os.Getenv("KUSTO_INGEST_DATABASE"); v != "" {
+			flagDatabase = v
+			dbFromEnv = true
+		}
 	}
 	if flagCluster == "" {
 		return fmt.Errorf("--cluster is required (or set KUSTO_INGEST_CLUSTER)")
 	}
 	if flagDatabase == "" {
 		return fmt.Errorf("--database is required (or set KUSTO_INGEST_DATABASE)")
+	}
+	if clusterFromEnv {
+		fmt.Printf("Using KUSTO_INGEST_CLUSTER=%s\n", flagCluster)
+	}
+	if dbFromEnv {
+		fmt.Printf("Using KUSTO_INGEST_DATABASE=%s\n", flagDatabase)
 	}
 
 	path := args[0]
