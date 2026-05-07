@@ -37,6 +37,25 @@ func TestRowToJSONNullVsEmptyString(t *testing.T) {
 	}
 }
 
+func TestRowToJSONNonFiniteFloats(t *testing.T) {
+	cols := []string{"a", "b", "c", "d"}
+	types := []schema.KustoType{schema.TypeReal, schema.TypeReal, schema.TypeReal, schema.TypeReal}
+	rec := []string{"1.5", "NaN", "Inf", "-Inf"}
+	got, err := RowToJSON(cols, types, rec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	s := string(got)
+	if !strings.Contains(s, `"a":1.5`) {
+		t.Errorf("a missing: %s", s)
+	}
+	for _, k := range []string{`"b"`, `"c"`, `"d"`} {
+		if strings.Contains(s, k) {
+			t.Errorf("%s should be omitted (non-finite -> null), got %s", k, s)
+		}
+	}
+}
+
 func TestRowToJSONShortRecord(t *testing.T) {
 	cols := []string{"a", "b", "c"}
 	types := []schema.KustoType{schema.TypeLong, schema.TypeLong, schema.TypeString}

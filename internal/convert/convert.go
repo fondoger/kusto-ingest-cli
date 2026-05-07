@@ -3,6 +3,7 @@ package convert
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -30,6 +31,10 @@ func RowToJSON(cols []string, types []schema.KustoType, rec []string) ([]byte, e
 		if err != nil {
 			// fall back to raw string if conversion fails despite inference
 			obj[c] = v
+			continue
+		}
+		// JSON cannot represent NaN/±Inf; treat as null (omit the field).
+		if f, ok := converted.(float64); ok && (math.IsNaN(f) || math.IsInf(f, 0)) {
 			continue
 		}
 		obj[c] = converted
