@@ -123,33 +123,37 @@ type policyState struct {
 	dbTried, tblTried bool
 }
 
-func ingestBatch(c *kusto.Client, table, mappingName, format string, body []byte, append bool, st *policyState) error {
-	err := c.StreamIngest(table, mappingName, format, body)
+func ingestBatch(c *kusto.Client, table, mappingName, format string, body []byte, append bool, st *policyState) (int, error) {
+	totalRetries := 0
+	r, err := c.StreamIngest(table, mappingName, format, body)
+	totalRetries += r
 	if err == nil || !isPolicyNotEnabledErr(err) {
-		return err
+		return totalRetries, err
 	}
 	if !st.dbTried {
 		st.dbTried = true
 		fmt.Fprintf(os.Stderr, "  streaming ingestion policy not enabled — enabling at database level...\n")
 		if aerr := c.Mgmt(fmt.Sprintf(".alter database ['%s'] policy streamingingestion enable", escapeIdent(c.Database()))); aerr != nil {
-			return fmt.Errorf("enable database streaming policy: %w (original: %v)", aerr, err)
+			return totalRetries, fmt.Errorf("enable database streaming policy: %w (original: %v)", aerr, err)
 		}
 		time.Sleep(10 * time.Second)
-		err = c.StreamIngest(table, mappingName, format, body)
+		r, err = c.StreamIngest(table, mappingName, format, body)
+		totalRetries += r
 		if err == nil || !isPolicyNotEnabledErr(err) {
-			return err
+			return totalRetries, err
 		}
 	}
 	if append && !st.tblTried {
 		st.tblTried = true
 		fmt.Fprintf(os.Stderr, "  database-level policy still failing — enabling at table level...\n")
 		if aerr := c.Mgmt(fmt.Sprintf(".alter table ['%s'] policy streamingingestion enable", escapeIdent(table))); aerr != nil {
-			return fmt.Errorf("enable table streaming policy: %w (original: %v)", aerr, err)
+			return totalRetries, fmt.Errorf("enable table streaming policy: %w (original: %v)", aerr, err)
 		}
 		time.Sleep(10 * time.Second)
-		err = c.StreamIngest(table, mappingName, format, body)
+		r, err = c.StreamIngest(table, mappingName, format, body)
+		totalRetries += r
 	}
-	return err
+	return totalRetries, err
 }
 
 func ensureMapping(c *kusto.Client, table, mappingName string, sch *schema.Schema) error {
@@ -227,13 +231,18 @@ func streamUpload(c *kusto.Client, path, table, mappingName string, sch *schema.
 			fmt.Fprintf(os.Stderr, "  → batch #%d table=%s size=%d bytes\n", batchIdx, table, len(batch))
 		}
 		t0 := time.Now()
-		err := ingestBatch(c, table, mappingName, format, batch, opts.Append, policySt)
+		retries, err := ingestBatch(c, table, mappingName, format, batch, opts.Append, policySt)
 		if opts.Verbose {
+			retrySuffix := ""
+			if retries > 0 {
+				retrySuffix = fmt.Sprintf(" (retry=%d)", retries)
+			}
+			dur := time.Since(t0).Round(10 * time.Millisecond)
 			if err == nil {
-				fmt.Fprintf(os.Stderr, "    batch #%d OK in %s\n", batchIdx, time.Since(t0).Round(10*time.Millisecond))
+				fmt.Fprintf(os.Stderr, "    batch #%d OK in %s%s\n", batchIdx, dur, retrySuffix)
 			} else {
 				// Print the full error body in verbose mode (multi-line OK).
-				fmt.Fprintf(os.Stderr, "    batch #%d FAIL in %s:\n%s\n", batchIdx, time.Since(t0).Round(10*time.Millisecond), err.Error())
+				fmt.Fprintf(os.Stderr, "    batch #%d FAIL in %s%s:\n%s\n", batchIdx, dur, retrySuffix, err.Error())
 			}
 		}
 		// Throttle between batches: target a minimum 4-second batch cycle

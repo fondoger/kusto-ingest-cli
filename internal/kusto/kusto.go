@@ -52,11 +52,13 @@ func (c *Client) Database() string { return c.database }
 func (c *Client) Mgmt(csl string) error {
 	body, _ := json.Marshal(map[string]string{"db": c.database, "csl": csl})
 	endpoint := c.cluster + "/v1/rest/mgmt"
-	_, err := c.do("POST", endpoint, "application/json", body, true)
+	_, _, err := c.do("POST", endpoint, "application/json", body, true)
 	return err
 }
 
-func (c *Client) StreamIngest(table, mappingName, format string, body []byte) error {
+// StreamIngest returns (retries, err) where retries is the number of HTTP
+// retries that fired before the call returned (success or final failure).
+func (c *Client) StreamIngest(table, mappingName, format string, body []byte) (int, error) {
 	q := url.Values{}
 	q.Set("streamFormat", format)
 	q.Set("mappingName", mappingName)
@@ -66,24 +68,28 @@ func (c *Client) StreamIngest(table, mappingName, format string, body []byte) er
 	if format == "Tsv" {
 		contentType = "text/tab-separated-values"
 	}
-	_, err := c.do("POST", endpoint, contentType, body, false)
-	return err
+	_, retries, err := c.do("POST", endpoint, contentType, body, false)
+	return retries, err
 }
 
-func (c *Client) do(method, endpoint, contentType string, body []byte, allowJSONAccept bool) ([]byte, error) {
+// do executes the HTTP request with retries. Returns (body, retries, err)
+// where retries is the count of retry attempts that fired before the final
+// outcome (0 if first attempt succeeded; up to delays+transientDelays).
+func (c *Client) do(method, endpoint, contentType string, body []byte, allowJSONAccept bool) ([]byte, int, error) {
 	var lastErr error
 	delays := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
 	transientDelays := []time.Duration{5 * time.Second, 10 * time.Second, 20 * time.Second}
 	refreshed := false
 	retriedTransient := 0
+	retries := 0
 	for attempt := 0; attempt <= len(delays); attempt++ {
 		tok, err := c.tok.Token()
 		if err != nil {
-			return nil, err
+			return nil, retries, err
 		}
 		req, err := http.NewRequest(method, endpoint, bytes.NewReader(body))
 		if err != nil {
-			return nil, err
+			return nil, retries, err
 		}
 		req.Header.Set("Authorization", "Bearer "+tok)
 		req.Header.Set("Content-Type", contentType)
@@ -95,25 +101,28 @@ func (c *Client) do(method, endpoint, contentType string, body []byte, allowJSON
 			lastErr = err
 			if attempt < len(delays) {
 				time.Sleep(delays[attempt])
+				retries++
 				continue
 			}
-			return nil, err
+			return nil, retries, err
 		}
 		respBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			return respBody, nil
+			return respBody, retries, nil
 		}
 		if resp.StatusCode == 401 && !refreshed {
 			refreshed = true
 			if _, rerr := c.tok.Refresh(); rerr != nil {
-				return nil, rerr
+				return nil, retries, rerr
 			}
+			retries++
 			continue
 		}
 		if resp.StatusCode >= 500 && attempt < len(delays) {
 			lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(respBody), 2000))
 			time.Sleep(delays[attempt])
+			retries++
 			continue
 		}
 		// Transient streaming-ingest failures: 409 (buffer congestion) and
@@ -125,11 +134,12 @@ func (c *Client) do(method, endpoint, contentType string, body []byte, allowJSON
 			lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(respBody), 2000))
 			time.Sleep(transientDelays[retriedTransient])
 			retriedTransient++
+			retries++
 			continue
 		}
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(respBody), 2000))
+		return nil, retries, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(respBody), 2000))
 	}
-	return nil, lastErr
+	return nil, retries, lastErr
 }
 
 func truncate(s string, n int) string {
