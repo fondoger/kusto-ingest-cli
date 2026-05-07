@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,7 +17,15 @@ import (
 	"github.com/fondoger/kusto-ingest-cli/internal/schema"
 )
 
-const maxBatchBytes = 4 * 1024 * 1024 // 4 MiB
+const (
+	maxBatchBytes = 4 * 1024 * 1024 // 4 MiB
+	// Throttle so we stay under Kusto's recommended 4 GB/h-per-table guidance
+	// for streaming ingest. With min 4s/batch (4 MiB CSV → ~1 MiB/s = 3.6 GB/h)
+	// and a hard 1s breather between batches, we give the streaming-ingest
+	// commit pipeline time to drain even on fast networks.
+	minBatchCycle = 4 * time.Second
+	minBatchSleep = 1 * time.Second
+)
 
 type Result struct {
 	Table    string
@@ -114,8 +123,8 @@ type policyState struct {
 	dbTried, tblTried bool
 }
 
-func ingestBatch(c *kusto.Client, table, mappingName string, body []byte, append bool, st *policyState) error {
-	err := c.StreamIngest(table, mappingName, body)
+func ingestBatch(c *kusto.Client, table, mappingName, format string, body []byte, append bool, st *policyState) error {
+	err := c.StreamIngest(table, mappingName, format, body)
 	if err == nil || !isPolicyNotEnabledErr(err) {
 		return err
 	}
@@ -126,7 +135,7 @@ func ingestBatch(c *kusto.Client, table, mappingName string, body []byte, append
 			return fmt.Errorf("enable database streaming policy: %w (original: %v)", aerr, err)
 		}
 		time.Sleep(10 * time.Second)
-		err = c.StreamIngest(table, mappingName, body)
+		err = c.StreamIngest(table, mappingName, format, body)
 		if err == nil || !isPolicyNotEnabledErr(err) {
 			return err
 		}
@@ -138,7 +147,7 @@ func ingestBatch(c *kusto.Client, table, mappingName string, body []byte, append
 			return fmt.Errorf("enable table streaming policy: %w (original: %v)", aerr, err)
 		}
 		time.Sleep(10 * time.Second)
-		err = c.StreamIngest(table, mappingName, body)
+		err = c.StreamIngest(table, mappingName, format, body)
 	}
 	return err
 }
@@ -150,11 +159,11 @@ func ensureMapping(c *kusto.Client, table, mappingName string, sch *schema.Schem
 	}
 	entries := make([]mapEntry, len(sch.Columns))
 	for i, col := range sch.Columns {
-		entries[i] = mapEntry{Column: col, Properties: map[string]string{"Path": "$." + col}}
+		entries[i] = mapEntry{Column: col, Properties: map[string]string{"Ordinal": strconv.Itoa(i)}}
 	}
 	mappingJSON, _ := json.Marshal(entries)
-	// Embed JSON as a Kusto literal using ``` fenced literal to avoid escaping.
-	csl := fmt.Sprintf(".create-or-alter table ['%s'] ingestion json mapping '%s' ```%s```",
+	// CSV mapping covers both Csv and Tsv streamFormat (column-by-ordinal).
+	csl := fmt.Sprintf(".create-or-alter table ['%s'] ingestion csv mapping '%s' ```%s```",
 		escapeIdent(table), escapeIdent(mappingName), string(mappingJSON))
 	if err := c.Mgmt(csl); err != nil {
 		return fmt.Errorf("create mapping: %w", err)
@@ -191,14 +200,20 @@ func streamUpload(c *kusto.Client, path, table, mappingName string, sch *schema.
 	}
 	defer f.Close()
 
+	delim := schema.DelimiterFor(path)
 	cr := csv.NewReader(stripBOM(f))
-	cr.Comma = schema.DelimiterFor(path)
+	cr.Comma = delim
 	cr.FieldsPerRecord = -1
 	cr.LazyQuotes = true
 
 	// Skip header
 	if _, err := cr.Read(); err != nil {
 		return 0, 0, fmt.Errorf("read header: %w", err)
+	}
+
+	format := "Csv"
+	if delim == '\t' {
+		format = "Tsv"
 	}
 
 	var rowCount, byteCount int64
@@ -212,7 +227,7 @@ func streamUpload(c *kusto.Client, path, table, mappingName string, sch *schema.
 			fmt.Fprintf(os.Stderr, "  → batch #%d table=%s size=%d bytes\n", batchIdx, table, len(batch))
 		}
 		t0 := time.Now()
-		err := ingestBatch(c, table, mappingName, batch, opts.Append, policySt)
+		err := ingestBatch(c, table, mappingName, format, batch, opts.Append, policySt)
 		if opts.Verbose {
 			if err == nil {
 				fmt.Fprintf(os.Stderr, "    batch #%d OK in %s\n", batchIdx, time.Since(t0).Round(10*time.Millisecond))
@@ -224,10 +239,15 @@ func streamUpload(c *kusto.Client, path, table, mappingName string, sch *schema.
 				fmt.Fprintf(os.Stderr, "    batch #%d FAIL in %s: %s\n", batchIdx, time.Since(t0).Round(10*time.Millisecond), msg)
 			}
 		}
-		// Throttle between batches to avoid streaming-ingest queue buildup,
-		// which Kusto rejects with an opaque HTTP 409.
+		// Throttle between batches: target a minimum 4-second batch cycle
+		// (~3.6 GB/h per table, under Kusto's 4 GB/h streaming-ingest guidance)
+		// with at least 1 second of breathing room after every batch.
 		if err == nil {
-			time.Sleep(time.Second)
+			sleep := minBatchCycle - time.Since(t0)
+			if sleep < minBatchSleep {
+				sleep = minBatchSleep
+			}
+			time.Sleep(sleep)
 		}
 		return err
 	})
@@ -240,11 +260,8 @@ func streamUpload(c *kusto.Client, path, table, mappingName string, sch *schema.
 		if err != nil {
 			return rowCount, byteCount, fmt.Errorf("read row %d: %w", rowCount+1, err)
 		}
-		jb, err := convert.RowToJSON(sch.Columns, sch.Types, rec)
-		if err != nil {
-			return rowCount, byteCount, fmt.Errorf("convert row %d: %w", rowCount+1, err)
-		}
-		if err := batcher.Add(jb); err != nil {
+		line := convert.RowToCSV(sch.Columns, sch.Types, rec, delim)
+		if err := batcher.Add(line); err != nil {
 			return rowCount, byteCount, err
 		}
 		rowCount++

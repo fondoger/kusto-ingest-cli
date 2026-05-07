@@ -42,13 +42,17 @@ func (c *Client) Mgmt(csl string) error {
 	return err
 }
 
-func (c *Client) StreamIngest(table, mappingName string, body []byte) error {
+func (c *Client) StreamIngest(table, mappingName, format string, body []byte) error {
 	q := url.Values{}
-	q.Set("streamFormat", "MultiJson")
+	q.Set("streamFormat", format)
 	q.Set("mappingName", mappingName)
 	endpoint := fmt.Sprintf("%s/v1/rest/ingest/%s/%s?%s",
 		c.cluster, url.PathEscape(c.database), url.PathEscape(table), q.Encode())
-	_, err := c.do("POST", endpoint, "application/json", body, false)
+	contentType := "text/csv"
+	if format == "Tsv" {
+		contentType = "text/tab-separated-values"
+	}
+	_, err := c.do("POST", endpoint, contentType, body, false)
 	return err
 }
 

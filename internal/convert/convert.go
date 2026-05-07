@@ -1,89 +1,58 @@
 package convert
 
 import (
-	"encoding/json"
-	"fmt"
+	"bytes"
 	"math"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/fondoger/kusto-ingest-cli/internal/schema"
 )
 
-// RowToJSON converts a single CSV record into a JSON object respecting types.
-// Empty cells: string -> "", others -> field omitted (null).
-func RowToJSON(cols []string, types []schema.KustoType, rec []string) ([]byte, error) {
-	obj := make(map[string]any, len(cols))
-	for i, c := range cols {
+// RowToCSV encodes a single record as one CSV/TSV line (no trailing newline)
+// using the given delimiter. Type-aware sanitization:
+//   - Real columns: NaN/±Inf become empty (Kusto interprets empty as null)
+//   - All other types pass through; Kusto parses them per the table schema.
+//
+// Empty cells stay empty (null in Kusto). String columns also map empty to
+// null in CSV — this is a deliberate change from the JSON path, which kept
+// "" distinct from null. CSV cannot represent that distinction.
+func RowToCSV(cols []string, types []schema.KustoType, rec []string, delim rune) []byte {
+	var b bytes.Buffer
+	for i := range cols {
+		if i > 0 {
+			b.WriteRune(delim)
+		}
 		var v string
 		if i < len(rec) {
 			v = rec[i]
 		}
-		t := types[i]
-		if v == "" {
-			if t == schema.TypeString {
-				obj[c] = ""
+		v = sanitize(types[i], v)
+		writeCSVField(&b, v, delim)
+	}
+	return b.Bytes()
+}
+
+func sanitize(t schema.KustoType, v string) string {
+	if v == "" {
+		return ""
+	}
+	if t == schema.TypeReal {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			if math.IsNaN(f) || math.IsInf(f, 0) {
+				return ""
 			}
-			continue
-		}
-		converted, err := convertValue(t, v)
-		if err != nil {
-			// fall back to raw string if conversion fails despite inference
-			obj[c] = v
-			continue
-		}
-		// JSON cannot represent NaN/±Inf; treat as null (omit the field).
-		if f, ok := converted.(float64); ok && (math.IsNaN(f) || math.IsInf(f, 0)) {
-			continue
-		}
-		obj[c] = converted
-	}
-	return json.Marshal(obj)
-}
-
-func convertValue(t schema.KustoType, s string) (any, error) {
-	switch t {
-	case schema.TypeBool:
-		ls := strings.ToLower(s)
-		switch ls {
-		case "true", "1":
-			return true, nil
-		case "false", "0":
-			return false, nil
-		}
-		return nil, fmt.Errorf("bad bool")
-	case schema.TypeLong:
-		return strconv.ParseInt(s, 10, 64)
-	case schema.TypeReal:
-		return strconv.ParseFloat(s, 64)
-	case schema.TypeDateTime:
-		t := parseDateTime(s)
-		if t == nil {
-			return nil, fmt.Errorf("bad datetime")
-		}
-		return t.UTC().Format(time.RFC3339Nano), nil
-	case schema.TypeTimespan:
-		return s, nil
-	default:
-		return s, nil
-	}
-}
-
-var dtLayouts = []string{
-	time.RFC3339Nano,
-	time.RFC3339,
-	"2006-01-02T15:04:05",
-	"2006-01-02 15:04:05.999999999",
-	"2006-01-02 15:04:05",
-	"2006-01-02",
-}
-
-func parseDateTime(s string) *time.Time {
-	for _, l := range dtLayouts {
-		if t, err := time.Parse(l, s); err == nil {
-			return &t
 		}
 	}
-	return nil
+	return v
+}
+
+func writeCSVField(b *bytes.Buffer, s string, delim rune) {
+	if !strings.ContainsAny(s, "\"\r\n") && !strings.ContainsRune(s, delim) {
+		b.WriteString(s)
+		return
+	}
+	b.WriteByte('"')
+	b.WriteString(strings.ReplaceAll(s, `"`, `""`))
+	b.WriteByte('"')
 }
