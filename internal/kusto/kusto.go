@@ -73,7 +73,7 @@ func (c *Client) StreamIngest(table, mappingName, format string, body []byte) er
 func (c *Client) do(method, endpoint, contentType string, body []byte, allowJSONAccept bool) ([]byte, error) {
 	var lastErr error
 	delays := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
-	transientDelays := []time.Duration{5 * time.Second, 10 * time.Second}
+	transientDelays := []time.Duration{5 * time.Second, 10 * time.Second, 20 * time.Second}
 	refreshed := false
 	retriedTransient := 0
 	for attempt := 0; attempt <= len(delays); attempt++ {
