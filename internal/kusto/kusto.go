@@ -13,6 +13,20 @@ import (
 	"github.com/fondoger/kusto-ingest-cli/internal/auth"
 )
 
+// isTransientStreamingErr reports whether an error response is one of the
+// known transient streaming-ingest failures (409 buffer congestion, or
+// 400 EntityNotFound from streaming-ingest metadata cache lag right after
+// table/mapping creation).
+func isTransientStreamingErr(status int, body []byte) bool {
+	if status == 409 {
+		return true
+	}
+	if status == 400 && bytes.Contains(body, []byte("EntityNotFound")) {
+		return true
+	}
+	return false
+}
+
 type Client struct {
 	cluster  string
 	database string
@@ -59,8 +73,9 @@ func (c *Client) StreamIngest(table, mappingName, format string, body []byte) er
 func (c *Client) do(method, endpoint, contentType string, body []byte, allowJSONAccept bool) ([]byte, error) {
 	var lastErr error
 	delays := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
+	transientDelays := []time.Duration{5 * time.Second, 10 * time.Second}
 	refreshed := false
-	retried409 := 0
+	retriedTransient := 0
 	for attempt := 0; attempt <= len(delays); attempt++ {
 		tok, err := c.tok.Token()
 		if err != nil {
@@ -101,13 +116,15 @@ func (c *Client) do(method, endpoint, contentType string, body []byte, allowJSON
 			time.Sleep(delays[attempt])
 			continue
 		}
-		// 409 from streaming ingest typically means the table's streaming
-		// buffer is congested; one retry after a short wait is usually enough
-		// when paired with inter-batch throttling on the caller side.
-		if resp.StatusCode == 409 && retried409 < 1 {
-			retried409++
+		// Transient streaming-ingest failures: 409 (buffer congestion) and
+		// 400 EntityNotFound (metadata cache lag right after table/mapping
+		// creation). Retry up to len(transientDelays) times with longer waits
+		// than the 5xx backoff so the streaming-ingest service has time to
+		// drain its queue or refresh its cache.
+		if isTransientStreamingErr(resp.StatusCode, respBody) && retriedTransient < len(transientDelays) {
 			lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(respBody), 2000))
-			time.Sleep(5 * time.Second)
+			time.Sleep(transientDelays[retriedTransient])
+			retriedTransient++
 			continue
 		}
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(respBody), 2000))
