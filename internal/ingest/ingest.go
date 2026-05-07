@@ -21,10 +21,10 @@ const (
 	maxBatchBytes = 4 * 1024 * 1024 // 4 MiB
 	// Throttle so we stay well under Kusto's recommended 4 GB/h-per-table
 	// guidance for streaming ingest. With min 5s/batch (4 MiB CSV → ~0.8 MiB/s
-	// = 3.0 GB/h) and a hard 1s breather between batches, we give the
+	// = 3.0 GB/h) and a hard 2s breather between batches, we give the
 	// streaming-ingest commit pipeline time to drain even on fast networks.
 	minBatchCycle = 5 * time.Second
-	minBatchSleep = 1 * time.Second
+	minBatchSleep = 2 * time.Second
 )
 
 type Result struct {
