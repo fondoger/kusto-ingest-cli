@@ -19,10 +19,11 @@ import (
 
 const (
 	maxBatchBytes = 2 * 1024 * 1024 // 2 MiB — small batches keep the streaming-ingest commit queue from filling up
-	// Min 3s/batch with a hard 1s breather between batches keeps us under
-	// Kusto's 4 GB/h-per-table streaming-ingest guidance.
-	minBatchCycle = 3 * time.Second
-	minBatchSleep = 1 * time.Second
+	// Min 5s/batch with a hard 2s breather between batches keeps us well
+	// under Kusto's 4 GB/h-per-table streaming-ingest guidance (2 MiB / 5s
+	// ≈ 1.4 GB/h) so the buffer has time to drain.
+	minBatchCycle = 5 * time.Second
+	minBatchSleep = 2 * time.Second
 )
 
 type Result struct {
