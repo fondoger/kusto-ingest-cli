@@ -18,13 +18,9 @@ import (
 )
 
 const (
-	maxBatchBytes = 4 * 1024 * 1024 // 4 MiB
-	// Cap rows per batch — Kusto streaming ingest's commit pipeline appears
-	// to be limited by rows-per-sec (extent metadata cost) more than bytes,
-	// so wide-row files (many rows packed into 4 MiB) flood the buffer.
-	maxBatchRows = 200
-	// Smaller batches → less pressure → can throttle less aggressively.
-	// Min 3s/batch with a hard 1s breather between batches.
+	maxBatchBytes = 2 * 1024 * 1024 // 2 MiB — small batches keep the streaming-ingest commit queue from filling up
+	// Min 3s/batch with a hard 1s breather between batches keeps us under
+	// Kusto's 4 GB/h-per-table streaming-ingest guidance.
 	minBatchCycle = 3 * time.Second
 	minBatchSleep = 1 * time.Second
 )
@@ -227,7 +223,7 @@ func streamUpload(c *kusto.Client, path, table, mappingName string, sch *schema.
 
 	policySt := &policyState{}
 	batchIdx := 0
-	batcher := NewBatcher(maxBatchBytes, maxBatchRows, func(batch []byte) error {
+	batcher := NewBatcher(maxBatchBytes, 0, func(batch []byte) error {
 		batchIdx++
 		if opts.Verbose {
 			fmt.Fprintf(os.Stderr, "  → batch #%d table=%s size=%d bytes\n", batchIdx, table, len(batch))
