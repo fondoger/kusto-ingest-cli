@@ -31,6 +31,7 @@ type Options struct {
 	Append    bool
 	InferRows int
 	Quiet     bool // suppress progress bar (non-interactive environments)
+	Verbose   bool // log every batch upload (size, result, duration)
 	// Optional milestone callbacks for real-time progress reporting in quiet mode.
 	OnSchemaReady func(rows int64, cols int)
 	OnTableReady  func(table string)
@@ -204,8 +205,26 @@ func streamUpload(c *kusto.Client, path, table, mappingName string, sch *schema.
 	var lastOffset int64
 
 	policySt := &policyState{}
+	batchIdx := 0
 	batcher := NewBatcher(maxBatchBytes, func(batch []byte) error {
-		return ingestBatch(c, table, mappingName, batch, opts.Append, policySt)
+		batchIdx++
+		if opts.Verbose {
+			fmt.Fprintf(os.Stderr, "  → batch #%d table=%s size=%d bytes\n", batchIdx, table, len(batch))
+		}
+		t0 := time.Now()
+		err := ingestBatch(c, table, mappingName, batch, opts.Append, policySt)
+		if opts.Verbose {
+			if err == nil {
+				fmt.Fprintf(os.Stderr, "    batch #%d OK in %s\n", batchIdx, time.Since(t0).Round(10*time.Millisecond))
+			} else {
+				msg := err.Error()
+				if i := strings.IndexAny(msg, "\r\n"); i >= 0 {
+					msg = msg[:i]
+				}
+				fmt.Fprintf(os.Stderr, "    batch #%d FAIL in %s: %s\n", batchIdx, time.Since(t0).Round(10*time.Millisecond), msg)
+			}
+		}
+		return err
 	})
 
 	for {

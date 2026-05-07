@@ -26,6 +26,7 @@ var (
 	flagAppend      bool
 	flagInferRows   int
 	flagTablePrefix string
+	flagVerbose     bool
 )
 
 func main() {
@@ -45,6 +46,7 @@ func main() {
 	f.BoolVar(&flagAppend, "append", false, "Append to existing table (creates the table if missing). Without this flag, an existing table causes an error.")
 	f.IntVar(&flagInferRows, "infer-rows", 10000, "Max rows sampled for type inference (evenly distributed)")
 	f.StringVar(&flagTablePrefix, "table-prefix", "", "Prefix prepended to auto-derived table names (e.g. \"raw_\"). When set, digit-leading filenames don't get an extra underscore.")
+	f.BoolVarP(&flagVerbose, "verbose", "v", false, "Log every batch upload (size, result, duration)")
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(2)
 	}
@@ -143,6 +145,7 @@ func run(cmd *cobra.Command, args []string) error {
 			Append:    flagAppend,
 			InferRows: flagInferRows,
 			Quiet:     !interactive,
+			Verbose:   flagVerbose,
 		}
 		if !interactive {
 			opts.OnSchemaReady = func(rows int64, cols int) {
