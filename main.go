@@ -27,7 +27,7 @@ var (
 	flagInferRows   int
 	flagTablePrefix string
 	flagVerbose     bool
-	flagSilent      bool
+	flagQuiet       bool
 )
 
 func main() {
@@ -48,7 +48,7 @@ func main() {
 	f.IntVar(&flagInferRows, "infer-rows", 10000, "Max rows sampled for type inference (evenly distributed)")
 	f.StringVar(&flagTablePrefix, "table-prefix", "", "Prefix prepended to auto-derived table names (e.g. \"raw_\"). When set, digit-leading filenames don't get an extra underscore.")
 	f.BoolVarP(&flagVerbose, "verbose", "v", false, "Log every batch upload (size, result, duration)")
-	f.BoolVar(&flagSilent, "silent", false, "Suppress all per-file progress; only print errors. Exit code still indicates success/failure.")
+	f.BoolVar(&flagQuiet, "quiet", false, "Force non-interactive output (line-oriented, no progress bar). Same as running with stderr piped.")
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(2)
 	}
@@ -74,10 +74,10 @@ func run(cmd *cobra.Command, args []string) error {
 	if flagDatabase == "" {
 		return fmt.Errorf("--database is required (or set KUSTO_INGEST_DATABASE)")
 	}
-	if !flagSilent && clusterFromEnv {
+	if clusterFromEnv {
 		fmt.Printf("Using KUSTO_INGEST_CLUSTER=%s\n", flagCluster)
 	}
-	if !flagSilent && dbFromEnv {
+	if dbFromEnv {
 		fmt.Printf("Using KUSTO_INGEST_DATABASE=%s\n", flagDatabase)
 	}
 
@@ -116,10 +116,7 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 	client := kusto.New(flagCluster, flagDatabase, tok)
 
-	interactive := isInteractive() && !flagSilent
-	if !flagSilent && !interactive {
-		fmt.Fprintln(os.Stderr, "Non-interactive environment detected — using simplified output (no progress bar).")
-	}
+	interactive := isInteractive() && !flagQuiet
 
 	displayName := makeDisplayName(path, info.IsDir())
 
@@ -136,12 +133,10 @@ func run(cmd *cobra.Command, args []string) error {
 			table = defaultTableName(fp)
 		}
 		dn := displayName(fp)
-		if !flagSilent {
-			if interactive {
-				fmt.Fprintf(os.Stderr, "[%d/%d] uploading %s -> %s\n", i+1, len(files), dn, table)
-			} else {
-				fmt.Fprintf(os.Stderr, "[%d/%d] %s\n", i+1, len(files), dn)
-			}
+		if interactive {
+			fmt.Fprintf(os.Stderr, "[%d/%d] uploading %s -> %s\n", i+1, len(files), dn, table)
+		} else {
+			fmt.Fprintf(os.Stderr, "[%d/%d] %s\n", i+1, len(files), dn)
 		}
 
 		opts := ingest.Options{
@@ -149,9 +144,9 @@ func run(cmd *cobra.Command, args []string) error {
 			Append:    flagAppend,
 			InferRows: flagInferRows,
 			Quiet:     !interactive,
-			Verbose:   flagVerbose && !flagSilent,
+			Verbose:   flagVerbose,
 		}
-		if !interactive && !flagSilent {
+		if !interactive {
 			opts.OnSchemaReady = func(rows int64, cols int) {
 				fmt.Fprintf(os.Stderr, "      %d rows, %d cols\n", rows, cols)
 			}
@@ -163,31 +158,24 @@ func run(cmd *cobra.Command, args []string) error {
 		if res.Err != nil {
 			failed++
 			failures = append(failures, failure{fp, res.Err})
-			if !flagSilent {
-				if interactive {
-					fmt.Fprintf(os.Stderr, "  FAIL %s: %s\n", dn, firstLine(res.Err.Error()))
-				} else {
-					fmt.Fprintf(os.Stderr, "      FAIL: %s\n", firstLine(res.Err.Error()))
-				}
+			if interactive {
+				fmt.Fprintf(os.Stderr, "  FAIL %s: %s\n", dn, firstLine(res.Err.Error()))
+			} else {
+				fmt.Fprintf(os.Stderr, "      FAIL: %s\n", firstLine(res.Err.Error()))
 			}
 			continue
 		}
 		successes++
-		if !flagSilent {
-			if interactive {
-				fmt.Fprintf(os.Stderr, "  OK   %s  table=%s  rows=%d  %s  in %s\n",
-					dn, res.Table, res.Rows, humanBytes(res.Bytes), res.Duration.Round(100*time.Millisecond))
-			} else {
-				fmt.Fprintf(os.Stderr, "      OK in %s\n", res.Duration.Round(100*time.Millisecond))
-			}
+		if interactive {
+			fmt.Fprintf(os.Stderr, "  OK   %s  table=%s  rows=%d  %s  in %s\n",
+				dn, res.Table, res.Rows, humanBytes(res.Bytes), res.Duration.Round(100*time.Millisecond))
+		} else {
+			fmt.Fprintf(os.Stderr, "      OK in %s\n", res.Duration.Round(100*time.Millisecond))
 		}
 	}
 
-	if !flagSilent {
-		fmt.Fprintf(os.Stderr, "\nDone. %d succeeded, %d failed.\n", successes, failed)
-	}
+	fmt.Fprintf(os.Stderr, "\nDone. %d succeeded, %d failed.\n", successes, failed)
 	if failed > 0 {
-		// Always surface failures, even in silent mode.
 		fmt.Fprintln(os.Stderr, "Failed:")
 		for _, f := range failures {
 			fmt.Fprintf(os.Stderr, "  %s: %s\n", displayName(f.path), firstLine(f.err.Error()))
