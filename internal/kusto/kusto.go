@@ -97,7 +97,7 @@ func (c *Client) do(method, endpoint, contentType string, body []byte, allowJSON
 			continue
 		}
 		if resp.StatusCode >= 500 && attempt < len(delays) {
-			lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(respBody), 500))
+			lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(respBody), 2000))
 			time.Sleep(delays[attempt])
 			continue
 		}
@@ -106,11 +106,11 @@ func (c *Client) do(method, endpoint, contentType string, body []byte, allowJSON
 		// when paired with inter-batch throttling on the caller side.
 		if resp.StatusCode == 409 && retried409 < 1 {
 			retried409++
-			lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(respBody), 500))
+			lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(respBody), 2000))
 			time.Sleep(5 * time.Second)
 			continue
 		}
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(respBody), 500))
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(respBody), 2000))
 	}
 	return nil, lastErr
 }

@@ -63,7 +63,7 @@ func IngestFile(client *kusto.Client, path, table string, opts Options) Result {
 		res.Err = err
 		return res
 	}
-	mappingName := table + "_mapping"
+	mappingName := table + "_csv_mapping"
 	if err := ensureMapping(client, table, mappingName, sch); err != nil {
 		res.Err = err
 		return res
