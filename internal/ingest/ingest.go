@@ -224,6 +224,11 @@ func streamUpload(c *kusto.Client, path, table, mappingName string, sch *schema.
 				fmt.Fprintf(os.Stderr, "    batch #%d FAIL in %s: %s\n", batchIdx, time.Since(t0).Round(10*time.Millisecond), msg)
 			}
 		}
+		// Throttle between batches to avoid streaming-ingest queue buildup,
+		// which Kusto rejects with an opaque HTTP 409.
+		if err == nil {
+			time.Sleep(time.Second)
+		}
 		return err
 	})
 

@@ -56,6 +56,7 @@ func (c *Client) do(method, endpoint, contentType string, body []byte, allowJSON
 	var lastErr error
 	delays := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
 	refreshed := false
+	retried409 := 0
 	for attempt := 0; attempt <= len(delays); attempt++ {
 		tok, err := c.tok.Token()
 		if err != nil {
@@ -96,10 +97,11 @@ func (c *Client) do(method, endpoint, contentType string, body []byte, allowJSON
 			time.Sleep(delays[attempt])
 			continue
 		}
-		// 409 from streaming ingest is typically a metadata-cache race after
-		// a recent .drop+.create or .alter — wait longer than the 5xx backoff
-		// to give the streaming ingestion service time to refresh.
-		if resp.StatusCode == 409 && attempt < len(delays) {
+		// 409 from streaming ingest typically means the table's streaming
+		// buffer is congested; one retry after a short wait is usually enough
+		// when paired with inter-batch throttling on the caller side.
+		if resp.StatusCode == 409 && retried409 < 1 {
+			retried409++
 			lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(respBody), 500))
 			time.Sleep(5 * time.Second)
 			continue
