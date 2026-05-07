@@ -96,6 +96,14 @@ func (c *Client) do(method, endpoint, contentType string, body []byte, allowJSON
 			time.Sleep(delays[attempt])
 			continue
 		}
+		// 409 from streaming ingest is typically a metadata-cache race after
+		// a recent .drop+.create or .alter — wait longer than the 5xx backoff
+		// to give the streaming ingestion service time to refresh.
+		if resp.StatusCode == 409 && attempt < len(delays) {
+			lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(respBody), 500))
+			time.Sleep(5 * time.Second)
+			continue
+		}
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(respBody), 500))
 	}
 	return nil, lastErr
