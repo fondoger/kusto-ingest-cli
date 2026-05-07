@@ -232,11 +232,8 @@ func streamUpload(c *kusto.Client, path, table, mappingName string, sch *schema.
 			if err == nil {
 				fmt.Fprintf(os.Stderr, "    batch #%d OK in %s\n", batchIdx, time.Since(t0).Round(10*time.Millisecond))
 			} else {
-				msg := err.Error()
-				if i := strings.IndexAny(msg, "\r\n"); i >= 0 {
-					msg = msg[:i]
-				}
-				fmt.Fprintf(os.Stderr, "    batch #%d FAIL in %s: %s\n", batchIdx, time.Since(t0).Round(10*time.Millisecond), msg)
+				// Print the full error body in verbose mode (multi-line OK).
+				fmt.Fprintf(os.Stderr, "    batch #%d FAIL in %s:\n%s\n", batchIdx, time.Since(t0).Round(10*time.Millisecond), err.Error())
 			}
 		}
 		// Throttle between batches: target a minimum 4-second batch cycle
