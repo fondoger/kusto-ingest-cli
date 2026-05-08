@@ -171,9 +171,10 @@ func uploadViaSDK(c *kusto.Client, path, table, mappingName string, sch *schema.
 	}
 
 	if waitErr := <-result.Wait(ctx); waitErr != nil {
-		if opts.Verbose {
-			fmt.Fprintf(os.Stderr, "    SDK ingest FAIL:\n%s\n", waitErr.Error())
-		}
+		// Always dump the full multi-line SDK error on failure — this is the
+		// final outcome, not an intermediate retry, so the user needs to see
+		// it to debug.
+		fmt.Fprintf(os.Stderr, "    SDK ingest FAIL:\n%s\n", waitErr.Error())
 		return fmt.Errorf("ingestion failed: %s", summarizeIngestErr(waitErr))
 	}
 
