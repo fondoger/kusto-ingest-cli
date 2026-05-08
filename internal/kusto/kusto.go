@@ -1,150 +1,76 @@
+// Package kusto wraps the official azure-kusto-go SDK with the small surface
+// the rest of this CLI needs. Auth is delegated to the Azure CLI via WithAzCli;
+// users must `az login` before running.
 package kusto
 
 import (
-	"bytes"
-	"encoding/json"
+	"context"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
 	"strings"
-	"time"
 
-	"github.com/fondoger/kusto-ingest-cli/internal/auth"
+	"github.com/Azure/azure-kusto-go/azkustodata"
+	"github.com/Azure/azure-kusto-go/azkustodata/kql"
+	"github.com/Azure/azure-kusto-go/azkustoingest"
 )
 
-// isTransientStreamingErr reports whether an error response is one of the
-// known transient streaming-ingest failures (409 buffer congestion, or
-// 400 EntityNotFound from streaming-ingest metadata cache lag right after
-// table/mapping creation).
-func isTransientStreamingErr(status int, body []byte) bool {
-	if status == 409 {
-		return true
-	}
-	if status == 400 && bytes.Contains(body, []byte("EntityNotFound")) {
-		return true
-	}
-	return false
-}
-
 type Client struct {
+	data     *azkustodata.Client
+	ingest   *azkustoingest.Managed
 	cluster  string
 	database string
-	tok      *auth.TokenProvider
-	http     *http.Client
 }
 
-func New(cluster, database string, tok *auth.TokenProvider) *Client {
-	cluster = strings.TrimSpace(cluster)
-	if !strings.HasPrefix(cluster, "https://") && !strings.HasPrefix(cluster, "http://") {
-		cluster = "https://" + cluster
+// New constructs both a data-plane client (for mgmt commands) and a managed
+// ingestion client. The managed client auto-selects between streaming and
+// queued ingest based on payload size, so the caller doesn't have to decide.
+func New(cluster, database string) (*Client, error) {
+	cluster = normalizeURL(cluster)
+
+	kcsbData := azkustodata.NewConnectionStringBuilder(cluster).WithAzCli()
+	data, err := azkustodata.New(kcsbData)
+	if err != nil {
+		return nil, fmt.Errorf("kusto data client: %w", err)
 	}
+
+	kcsbIngest := azkustodata.NewConnectionStringBuilder(cluster).WithAzCli()
+	ingest, err := azkustoingest.NewManaged(kcsbIngest,
+		azkustoingest.WithDefaultDatabase(database))
+	if err != nil {
+		_ = data.Close()
+		return nil, fmt.Errorf("kusto ingest client: %w", err)
+	}
+
 	return &Client{
-		cluster:  strings.TrimRight(cluster, "/"),
+		data:     data,
+		ingest:   ingest,
+		cluster:  cluster,
 		database: database,
-		tok:      tok,
-		http:     &http.Client{Timeout: 5 * time.Minute},
-	}
+	}, nil
 }
 
 func (c *Client) Database() string { return c.database }
 
+func (c *Client) Ingestor() *azkustoingest.Managed { return c.ingest }
+
+// Mgmt runs an arbitrary control command. The SDK's kql.Builder requires
+// compile-time string constants for safety; we use AddUnsafe because table /
+// mapping names in our generated commands come from sanitized, internally-
+// trusted sources (see internal/namesafe).
 func (c *Client) Mgmt(csl string) error {
-	body, _ := json.Marshal(map[string]string{"db": c.database, "csl": csl})
-	endpoint := c.cluster + "/v1/rest/mgmt"
-	_, _, err := c.do("POST", endpoint, "application/json", body, true)
+	stmt := kql.New("").AddUnsafe(csl)
+	_, err := c.data.Mgmt(context.Background(), c.database, stmt)
 	return err
 }
 
-// StreamIngest returns (retries, err) where retries is the number of HTTP
-// retries that fired before the call returned (success or final failure).
-func (c *Client) StreamIngest(table, mappingName, format string, body []byte) (int, error) {
-	q := url.Values{}
-	q.Set("streamFormat", format)
-	q.Set("mappingName", mappingName)
-	endpoint := fmt.Sprintf("%s/v1/rest/ingest/%s/%s?%s",
-		c.cluster, url.PathEscape(c.database), url.PathEscape(table), q.Encode())
-	contentType := "text/csv"
-	if format == "Tsv" {
-		contentType = "text/tab-separated-values"
-	}
-	_, retries, err := c.do("POST", endpoint, contentType, body, false)
-	return retries, err
+func (c *Client) Close() error {
+	c.ingest.Close()
+	return c.data.Close()
 }
 
-// do executes the HTTP request with retries. Returns (body, retries, err)
-// where retries is the count of retry attempts that fired before the final
-// outcome (0 if first attempt succeeded; up to delays+transientDelays).
-func (c *Client) do(method, endpoint, contentType string, body []byte, allowJSONAccept bool) ([]byte, int, error) {
-	var lastErr error
-	delays := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
-	transientDelays := []time.Duration{10 * time.Second, 20 * time.Second, 30 * time.Second}
-	refreshed := false
-	retriedTransient := 0
-	retries := 0
-	for attempt := 0; attempt <= len(delays); attempt++ {
-		tok, err := c.tok.Token()
-		if err != nil {
-			return nil, retries, err
-		}
-		req, err := http.NewRequest(method, endpoint, bytes.NewReader(body))
-		if err != nil {
-			return nil, retries, err
-		}
-		req.Header.Set("Authorization", "Bearer "+tok)
-		req.Header.Set("Content-Type", contentType)
-		if allowJSONAccept {
-			req.Header.Set("Accept", "application/json")
-		}
-		resp, err := c.http.Do(req)
-		if err != nil {
-			lastErr = err
-			if attempt < len(delays) {
-				time.Sleep(delays[attempt])
-				retries++
-				continue
-			}
-			return nil, retries, err
-		}
-		respBody, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			return respBody, retries, nil
-		}
-		if resp.StatusCode == 401 && !refreshed {
-			refreshed = true
-			if _, rerr := c.tok.Refresh(); rerr != nil {
-				return nil, retries, rerr
-			}
-			retries++
-			continue
-		}
-		if resp.StatusCode >= 500 && attempt < len(delays) {
-			lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(respBody), 2000))
-			time.Sleep(delays[attempt])
-			retries++
-			continue
-		}
-		// Transient streaming-ingest failures: 409 (buffer congestion) and
-		// 400 EntityNotFound (metadata cache lag right after table/mapping
-		// creation). Retry up to len(transientDelays) times with longer waits
-		// than the 5xx backoff so the streaming-ingest service has time to
-		// drain its queue or refresh its cache.
-		if isTransientStreamingErr(resp.StatusCode, respBody) && retriedTransient < len(transientDelays) {
-			lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(respBody), 2000))
-			time.Sleep(transientDelays[retriedTransient])
-			retriedTransient++
-			retries++
-			continue
-		}
-		return nil, retries, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(respBody), 2000))
+func normalizeURL(s string) string {
+	s = strings.TrimSpace(s)
+	if !strings.HasPrefix(s, "https://") && !strings.HasPrefix(s, "http://") {
+		s = "https://" + s
 	}
-	return nil, retries, lastErr
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
+	return strings.TrimRight(s, "/")
 }

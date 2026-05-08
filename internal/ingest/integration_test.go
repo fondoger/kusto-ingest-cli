@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/fondoger/kusto-ingest-cli/internal/auth"
 	"github.com/fondoger/kusto-ingest-cli/internal/ingest"
 	"github.com/fondoger/kusto-ingest-cli/internal/kusto"
 )
@@ -29,11 +28,11 @@ func TestIngestEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tok := auth.New(cluster)
-	if _, err := tok.Token(); err != nil {
-		t.Fatalf("token: %v", err)
+	client, err := kusto.New(cluster, db)
+	if err != nil {
+		t.Fatalf("kusto client: %v", err)
 	}
-	client := kusto.New(cluster, db, tok)
+	defer client.Close()
 
 	res := ingest.IngestFile(client, csvPath, "ingest_test_table", ingest.Options{
 		Force:     true,

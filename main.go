@@ -11,7 +11,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/fondoger/kusto-ingest-cli/internal/auth"
 	"github.com/fondoger/kusto-ingest-cli/internal/ingest"
 	"github.com/fondoger/kusto-ingest-cli/internal/kusto"
 	"github.com/fondoger/kusto-ingest-cli/internal/namesafe"
@@ -110,11 +109,11 @@ func run(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	tok := auth.New(flagCluster)
-	if _, err := tok.Token(); err != nil {
+	client, err := kusto.New(flagCluster, flagDatabase)
+	if err != nil {
 		return err
 	}
-	client := kusto.New(flagCluster, flagDatabase, tok)
+	defer client.Close()
 
 	interactive := isInteractive() && !flagQuiet
 
