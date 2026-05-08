@@ -109,6 +109,11 @@ func stripBOMReader(r io.Reader) io.Reader {
 	return &bomReader{r: r}
 }
 
+// StripBOMReader strips a leading UTF-8 BOM (EF BB BF) on first read.
+func StripBOMReader(r io.Reader) io.Reader {
+	return &bomReader{r: r}
+}
+
 func newCSVReader(r io.Reader, delim rune) *csv.Reader {
 	cr := csv.NewReader(stripBOMReader(r))
 	cr.Comma = delim

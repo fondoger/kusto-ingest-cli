@@ -2,8 +2,10 @@ package ingest
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/Azure/azure-kusto-go/azkustoingest"
 
+	"github.com/fondoger/kusto-ingest-cli/internal/convert"
 	"github.com/fondoger/kusto-ingest-cli/internal/kusto"
 	"github.com/fondoger/kusto-ingest-cli/internal/schema"
 )
@@ -69,7 +72,7 @@ func IngestFile(client *kusto.Client, path, table string, opts Options) Result {
 		opts.OnTableReady(table)
 	}
 
-	if err := uploadViaSDK(client, path, table, mappingName, opts); err != nil {
+	if err := uploadViaSDK(client, path, table, mappingName, sch, opts); err != nil {
 		res.Err = err
 	}
 	res.Duration = time.Since(start)
@@ -124,30 +127,43 @@ func escapeIdent(s string) string {
 	return strings.ReplaceAll(s, "'", "''")
 }
 
-// uploadViaSDK hands the file off to the SDK's managed ingest client. The SDK
-// takes care of compression, blob upload (for the queued path), queue
-// messaging, and automatic streaming-vs-queued selection based on payload
-// size. We wait synchronously on the result so the per-file outcome is known
-// before returning.
-func uploadViaSDK(c *kusto.Client, path, table, mappingName string, opts Options) error {
+// uploadViaSDK streams the file through a CSV-normalizing transform into the
+// SDK's managed ingest client. The transform handles row-count mismatches
+// (pads short rows, truncates long ones to len(sch.Columns)), strips NaN/Inf
+// from real columns, and skips the header row server-side via Go's csv.Reader
+// — so we don't pass IgnoreFirstRecord(). The SDK still picks streaming vs
+// queued automatically based on payload size.
+func uploadViaSDK(c *kusto.Client, path, table, mappingName string, sch *schema.Schema, opts Options) error {
 	format := azkustoingest.CSV
 	if strings.EqualFold(filepath.Ext(path), ".tsv") {
 		format = azkustoingest.TSV
 	}
+	delim := schema.DelimiterFor(path)
 
 	if opts.Verbose {
 		fmt.Fprintf(os.Stderr, "  → handing off to SDK (managed) format=%s\n", format)
 	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	pr, pw := io.Pipe()
+	go func() {
+		err := transformCSV(f, pw, sch, delim)
+		_ = pw.CloseWithError(err)
+	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 
 	t0 := time.Now()
 	ingestor := c.Ingestor()
-	result, err := ingestor.FromFile(ctx, path,
+	result, err := ingestor.FromReader(ctx, pr,
 		azkustoingest.Table(table),
 		azkustoingest.IngestionMappingRef(mappingName, format),
-		azkustoingest.IgnoreFirstRecord(),
 		azkustoingest.ReportResultToTable(),
 	)
 	if err != nil {
@@ -165,6 +181,47 @@ func uploadViaSDK(c *kusto.Client, path, table, mappingName string, opts Options
 		fmt.Fprintf(os.Stderr, "    SDK ingest OK in %s\n", time.Since(t0).Round(10*time.Millisecond))
 	}
 	return nil
+}
+
+// transformCSV reads CSV/TSV from src using Go's RFC 4180 reader, drops the
+// header, normalizes each row to len(sch.Columns) (padding short rows with
+// empty fields, truncating long ones), sanitizes NaN/Inf in real columns,
+// and writes a clean CSV/TSV stream to dst.
+//
+// This insulates Kusto from common malformed-CSV errors:
+//   - Stream_WrongNumberOfFields (inconsistent column counts)
+//   - parse failures on NaN/±Inf for real columns
+//   - rows with embedded commas/newlines that aren't quoted properly
+func transformCSV(src io.Reader, dst io.Writer, sch *schema.Schema, delim rune) error {
+	cr := csv.NewReader(schema.StripBOMReader(src))
+	cr.Comma = delim
+	cr.FieldsPerRecord = -1
+	cr.LazyQuotes = true
+	cr.ReuseRecord = true
+
+	// Skip header row.
+	if _, err := cr.Read(); err != nil {
+		return fmt.Errorf("read header: %w", err)
+	}
+
+	var row int64
+	for {
+		rec, err := cr.Read()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("read row %d: %w", row+1, err)
+		}
+		line := convert.RowToCSV(sch.Columns, sch.Types, rec, delim)
+		if _, err := dst.Write(line); err != nil {
+			return err
+		}
+		if _, err := dst.Write([]byte{'\n'}); err != nil {
+			return err
+		}
+		row++
+	}
 }
 
 // summarizeIngestErr extracts the most useful single-line context out of an
