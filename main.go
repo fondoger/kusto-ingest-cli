@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Azure/azure-kusto-go/azkustoingest"
 	"github.com/spf13/cobra"
 
 	"github.com/fondoger/kusto-ingest-cli/internal/ingest"
@@ -32,7 +34,7 @@ var (
 func main() {
 	rootCmd := &cobra.Command{
 		Use:          "kusto-ingest-cli <path>",
-		Short:        "Ingest CSV/TSV files into Azure Data Explorer (Kusto) via Streaming Ingest",
+		Short:        "Ingest CSV/TSV files into Azure Data Explorer (Kusto)",
 		Args:         cobra.ExactArgs(1),
 		RunE:         run,
 		SilenceUsage: true,
@@ -46,11 +48,22 @@ func main() {
 	f.BoolVar(&flagAppend, "append", false, "Append to existing table (creates the table if missing). Without this flag, an existing table causes an error.")
 	f.IntVar(&flagInferRows, "infer-rows", 10000, "Max rows sampled for type inference (evenly distributed)")
 	f.StringVar(&flagTablePrefix, "table-prefix", "", "Prefix prepended to auto-derived table names (e.g. \"raw_\"). When set, digit-leading filenames don't get an extra underscore.")
-	f.BoolVarP(&flagVerbose, "verbose", "v", false, "Log every batch upload (size, result, duration)")
-	f.BoolVar(&flagQuiet, "quiet", false, "Force non-interactive output (line-oriented, no progress bar). Same as running with stderr piped.")
+	f.BoolVarP(&flagVerbose, "verbose", "v", false, "Log detailed ingestion info")
+	f.BoolVar(&flagQuiet, "quiet", false, "Force non-interactive output (no progress bar, compact lines)")
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(2)
 	}
+}
+
+// submitted tracks one file that was successfully submitted for ingestion.
+type submitted struct {
+	index     int
+	dn        string // display name
+	table     string
+	rows      int64
+	bytes     int64
+	sdkResult *azkustoingest.Result
+	start     time.Time
 }
 
 func run(cmd *cobra.Command, args []string) error {
@@ -85,7 +98,6 @@ func run(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("path: %w", err)
 	}
-
 	files, err := collectFiles(path, info, flagRecursive)
 	if err != nil {
 		return err
@@ -93,7 +105,6 @@ func run(cmd *cobra.Command, args []string) error {
 	if len(files) == 0 {
 		return fmt.Errorf("no .csv/.tsv files found at %s", path)
 	}
-
 	if info.IsDir() && flagTable != "" {
 		return fmt.Errorf("--table is not allowed when <path> is a directory")
 	}
@@ -105,7 +116,7 @@ func run(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("--table-prefix cannot be combined with --table")
 		}
 		if !namesafe.ValidIdentifier(flagTablePrefix) {
-			return fmt.Errorf("--table-prefix %q is not a valid Kusto identifier (allowed: letters/digits/underscore, must not start with a digit)", flagTablePrefix)
+			return fmt.Errorf("--table-prefix %q is not a valid Kusto identifier", flagTablePrefix)
 		}
 	}
 
@@ -116,15 +127,18 @@ func run(cmd *cobra.Command, args []string) error {
 	defer client.Close()
 
 	interactive := isInteractive() && !flagQuiet
-
 	displayName := makeDisplayName(path, info.IsDir())
-
-	successes, failed := 0, 0
-	type failure struct {
-		path string
-		err  error
+	opts := ingest.Options{
+		Force:     flagForce,
+		Append:    flagAppend,
+		InferRows: flagInferRows,
+		Quiet:     !interactive,
+		Verbose:   flagVerbose,
 	}
-	var failures []failure
+
+	// ── Phase 1: submit all files ────────────────────────────────────────
+	var uploads []submitted
+	uploadErrors := 0
 
 	for i, fp := range files {
 		table := flagTable
@@ -132,61 +146,120 @@ func run(cmd *cobra.Command, args []string) error {
 			table = defaultTableName(fp)
 		}
 		dn := displayName(fp)
-		if interactive {
-			fmt.Fprintf(os.Stderr, "[%d/%d] uploading %s -> %s\n", i+1, len(files), dn, table)
-		} else {
-			fmt.Fprintf(os.Stderr, "[%d/%d] %s\n", i+1, len(files), dn)
+		fi, _ := os.Stat(fp)
+		sizeStr := ""
+		if fi != nil {
+			sizeStr = humanBytes(fi.Size())
 		}
 
-		opts := ingest.Options{
-			Force:     flagForce,
-			Append:    flagAppend,
-			InferRows: flagInferRows,
-			Quiet:     !interactive,
-			Verbose:   flagVerbose,
+		if interactive {
+			fmt.Fprintf(os.Stderr, "[%d/%d] uploading %s (%s) -> %s\n",
+				i+1, len(files), dn, sizeStr, table)
+		} else {
+			// Quiet: partial line — will be completed with "uploaded" or "FAIL"
+			fmt.Fprintf(os.Stderr, "[%d/%d] %s %s -> %s ",
+				i+1, len(files), dn, sizeStr, table)
 		}
-		if !interactive {
-			opts.OnSchemaReady = func(rows int64, cols int) {
-				fmt.Fprintf(os.Stderr, "      %d rows, %d cols\n", rows, cols)
-			}
-			opts.OnTableReady = func(table string) {
-				fmt.Fprintf(os.Stderr, "      → %s\n", table)
-			}
-		}
-		res := ingest.IngestFile(client, fp, table, opts)
+
+		start := time.Now()
+		res := ingest.SubmitFile(client, fp, table, opts)
+
 		if res.Err != nil {
-			failed++
-			failures = append(failures, failure{fp, res.Err})
+			uploadErrors++
 			if interactive {
 				fmt.Fprintf(os.Stderr, "  FAIL %s: %s\n", dn, firstLine(res.Err.Error()))
 			} else {
-				fmt.Fprintf(os.Stderr, "      FAIL: %s\n", firstLine(res.Err.Error()))
+				fmt.Fprintf(os.Stderr, "FAIL %s\n", firstLine(res.Err.Error()))
 			}
 			continue
 		}
-		successes++
+
 		if interactive {
-			fmt.Fprintf(os.Stderr, "  OK   %s  table=%s  rows=%d  %s  in %s\n",
-				dn, res.Table, res.Rows, humanBytes(res.Bytes), res.Duration.Round(100*time.Millisecond))
+			// Progress bar already printed " uploaded\n" via OnCompletion.
 		} else {
-			fmt.Fprintf(os.Stderr, "      OK in %s\n", res.Duration.Round(100*time.Millisecond))
+			fmt.Fprintf(os.Stderr, "uploaded\n")
+		}
+
+		uploads = append(uploads, submitted{
+			index:     i,
+			dn:        dn,
+			table:     table,
+			rows:      res.Rows,
+			bytes:     res.Bytes,
+			sdkResult: res.SDKResult,
+			start:     start,
+		})
+	}
+
+	if len(uploads) == 0 {
+		fmt.Fprintf(os.Stderr, "\nNo files uploaded successfully.\n")
+		os.Exit(1)
+	}
+
+	// ── Phase 2: wait for all ingestions to complete ──────────────────────
+	fmt.Fprintf(os.Stderr, "\nWaiting for ingestion to complete. "+
+		"(Ctrl+C to exit — ingestion continues server-side)\n")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	type doneMsg struct {
+		idx int
+		err error
+	}
+	doneCh := make(chan doneMsg, len(uploads))
+	for i, u := range uploads {
+		i, u := i, u
+		go func() {
+			waitErr := <-u.sdkResult.Wait(ctx)
+			doneCh <- doneMsg{i, waitErr}
+		}()
+	}
+
+	successes, failures := 0, 0
+	type failInfo struct {
+		dn  string
+		err error
+	}
+	var failList []failInfo
+
+	for range uploads {
+		msg := <-doneCh
+		u := uploads[msg.idx]
+		dur := time.Since(u.start).Round(100 * time.Millisecond)
+
+		if msg.err != nil {
+			failures++
+			if interactive {
+				fmt.Fprintf(os.Stderr, "  FAIL [%d/%d] %s -> %s\n",
+					u.index+1, len(files), u.dn, u.table)
+				fmt.Fprintf(os.Stderr, "    %s", ingest.FormatIngestErr(msg.err))
+			} else {
+				fmt.Fprintf(os.Stderr, "  [%d/%d] FAIL %s\n",
+					u.index+1, len(files), ingest.SummarizeIngestErr(msg.err))
+			}
+			failList = append(failList, failInfo{u.dn, msg.err})
+		} else {
+			successes++
+			if interactive {
+				fmt.Fprintf(os.Stderr, "  OK   [%d/%d] %s -> %s  rows=%d  ingested in %s\n",
+					u.index+1, len(files), u.dn, u.table, u.rows, dur)
+			} else {
+				fmt.Fprintf(os.Stderr, "  [%d/%d] OK %s\n",
+					u.index+1, len(files), dur)
+			}
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "\nDone. %d succeeded, %d failed.\n", successes, failed)
-	if failed > 0 {
-		fmt.Fprintln(os.Stderr, "Failed:")
-		for _, f := range failures {
-			fmt.Fprintf(os.Stderr, "  %s: %s\n", displayName(f.path), firstLine(f.err.Error()))
-		}
+	// ── Summary ──────────────────────────────────────────────────────────
+	totalFailed := failures + uploadErrors
+	fmt.Fprintf(os.Stderr, "\nDone. %d succeeded, %d failed.\n", successes, totalFailed)
+	if totalFailed > 0 {
 		os.Exit(1)
 	}
 	return nil
 }
 
-// makeDisplayName returns a function that formats a file path for output.
-// Single-file mode shows just the basename; directory mode shows the path
-// relative to the input directory (with forward slashes).
 func makeDisplayName(inputPath string, isDir bool) func(string) string {
 	if !isDir {
 		return func(fp string) string { return filepath.Base(fp) }
@@ -199,9 +272,6 @@ func makeDisplayName(inputPath string, isDir bool) func(string) string {
 	}
 }
 
-// isInteractive reports whether stderr is a terminal (where the progress bar
-// renders correctly). In CI, redirected pipes, or background runs it returns
-// false, and we use simplified line-oriented output instead.
 func isInteractive() bool {
 	fi, err := os.Stderr.Stat()
 	if err != nil {

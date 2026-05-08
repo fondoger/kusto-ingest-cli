@@ -1,16 +1,16 @@
 package ingest_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/fondoger/kusto-ingest-cli/internal/ingest"
 	"github.com/fondoger/kusto-ingest-cli/internal/kusto"
 )
 
-// Integration test: opt-in via env vars.
-// Set KUSTO_TEST_CLUSTER and KUSTO_TEST_DB to enable. Requires `az login` first.
 func TestIngestEndToEnd(t *testing.T) {
 	cluster := os.Getenv("KUSTO_TEST_CLUSTER")
 	db := os.Getenv("KUSTO_TEST_DB")
@@ -34,15 +34,22 @@ func TestIngestEndToEnd(t *testing.T) {
 	}
 	defer client.Close()
 
-	res := ingest.IngestFile(client, csvPath, "ingest_test_table", ingest.Options{
+	res := ingest.SubmitFile(client, csvPath, "ingest_test_table", ingest.Options{
 		Force:     true,
 		InferRows: 1000,
 	})
 	if res.Err != nil {
-		t.Fatalf("ingest failed: %v", res.Err)
+		t.Fatalf("submit failed: %v", res.Err)
 	}
 	if res.Rows != 3 {
 		t.Errorf("rows = %d, want 3", res.Rows)
+	}
+	if res.SDKResult != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		if waitErr := <-res.SDKResult.Wait(ctx); waitErr != nil {
+			t.Fatalf("ingestion failed: %v", waitErr)
+		}
 	}
 
 	t.Cleanup(func() {
