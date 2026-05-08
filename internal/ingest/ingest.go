@@ -155,11 +155,40 @@ func uploadViaSDK(c *kusto.Client, path, table, mappingName string, opts Options
 	}
 
 	if waitErr := <-result.Wait(ctx); waitErr != nil {
-		return fmt.Errorf("ingestion failed: %w", waitErr)
+		if opts.Verbose {
+			fmt.Fprintf(os.Stderr, "    SDK ingest FAIL:\n%s\n", waitErr.Error())
+		}
+		return fmt.Errorf("ingestion failed: %s", summarizeIngestErr(waitErr))
 	}
 
 	if opts.Verbose {
 		fmt.Fprintf(os.Stderr, "    SDK ingest OK in %s\n", time.Since(t0).Round(10*time.Millisecond))
 	}
 	return nil
+}
+
+// summarizeIngestErr extracts the most useful single-line context out of an
+// SDK ingestion error. The SDK's error string is multi-line (pretty-printed
+// status record), and main.go strips at the first newline for non-verbose
+// output, so without this we'd just see "Ingestion Failed".
+func summarizeIngestErr(err error) string {
+	parts := []string{}
+	if status, e := azkustoingest.GetIngestionStatus(err); e == nil {
+		parts = append(parts, fmt.Sprintf("status=%s", status))
+	}
+	if code, e := azkustoingest.GetErrorCode(err); e == nil && code != "" {
+		parts = append(parts, fmt.Sprintf("errorCode=%s", code))
+	}
+	if fs, e := azkustoingest.GetIngestionFailureStatus(err); e == nil {
+		parts = append(parts, fmt.Sprintf("failureStatus=%s", fs))
+	}
+	if len(parts) == 0 {
+		// Not a status record — fall back to first line of the raw error.
+		s := err.Error()
+		if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+			return s[:i]
+		}
+		return s
+	}
+	return strings.Join(parts, " ")
 }
