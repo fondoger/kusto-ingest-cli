@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Azure/azure-kusto-go/azkustoingest"
+	"github.com/schollz/progressbar/v3"
 
 	"github.com/fondoger/kusto-ingest-cli/internal/convert"
 	"github.com/fondoger/kusto-ingest-cli/internal/kusto"
@@ -140,8 +141,13 @@ func uploadViaSDK(c *kusto.Client, path, table, mappingName string, sch *schema.
 	}
 	delim := schema.DelimiterFor(path)
 
+	fi, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+
 	if opts.Verbose {
-		fmt.Fprintf(os.Stderr, "  → handing off to SDK (managed) format=%s\n", format)
+		fmt.Fprintf(os.Stderr, "  → queued ingest via SDK, format=%s\n", format)
 	}
 
 	f, err := os.Open(path)
@@ -150,9 +156,24 @@ func uploadViaSDK(c *kusto.Client, path, table, mappingName string, sch *schema.
 	}
 	defer f.Close()
 
+	// Wrap the file in a counting reader for the progress bar.
+	var reader io.Reader = f
+	var bar *progressbar.ProgressBar
+	if !opts.Quiet {
+		bar = progressbar.NewOptions64(fi.Size(),
+			progressbar.OptionSetDescription(fmt.Sprintf("  %s", baseName(path))),
+			progressbar.OptionShowBytes(true),
+			progressbar.OptionShowCount(),
+			progressbar.OptionSetWidth(20),
+			progressbar.OptionThrottle(100*time.Millisecond),
+			progressbar.OptionOnCompletion(func() { fmt.Fprint(os.Stderr, "\n") }),
+		)
+		reader = io.TeeReader(f, bar)
+	}
+
 	pr, pw := io.Pipe()
 	go func() {
-		err := transformCSV(f, pw, sch, delim)
+		err := transformCSV(reader, pw, sch, delim)
 		_ = pw.CloseWithError(err)
 	}()
 
@@ -166,14 +187,17 @@ func uploadViaSDK(c *kusto.Client, path, table, mappingName string, sch *schema.
 		azkustoingest.IngestionMappingRef(mappingName, format),
 		azkustoingest.ReportResultToTable(),
 	)
+	if bar != nil {
+		_ = bar.Finish()
+	}
 	if err != nil {
 		return fmt.Errorf("submit ingestion: %w", err)
 	}
 
+	if !opts.Quiet {
+		fmt.Fprintf(os.Stderr, "  waiting for Kusto to complete ingestion...\n")
+	}
 	if waitErr := <-result.Wait(ctx); waitErr != nil {
-		// Always dump a cleaned-up version of the SDK error on failure — this
-		// is the final outcome, not an intermediate retry, so the user needs
-		// to see it to debug.
 		fmt.Fprintf(os.Stderr, "    SDK ingest FAIL:\n%s", formatIngestErr(waitErr))
 		return fmt.Errorf("ingestion failed: %s", summarizeIngestErr(waitErr))
 	}
@@ -182,6 +206,15 @@ func uploadViaSDK(c *kusto.Client, path, table, mappingName string, sch *schema.
 		fmt.Fprintf(os.Stderr, "    SDK ingest OK in %s\n", time.Since(t0).Round(10*time.Millisecond))
 	}
 	return nil
+}
+
+func baseName(p string) string {
+	for i := len(p) - 1; i >= 0; i-- {
+		if p[i] == '/' || p[i] == '\\' {
+			return p[i+1:]
+		}
+	}
+	return p
 }
 
 // transformCSV reads CSV/TSV from src using Go's RFC 4180 reader, drops the
