@@ -171,10 +171,10 @@ func uploadViaSDK(c *kusto.Client, path, table, mappingName string, sch *schema.
 	}
 
 	if waitErr := <-result.Wait(ctx); waitErr != nil {
-		// Always dump the full multi-line SDK error on failure — this is the
-		// final outcome, not an intermediate retry, so the user needs to see
-		// it to debug.
-		fmt.Fprintf(os.Stderr, "    SDK ingest FAIL:\n%s\n", waitErr.Error())
+		// Always dump a cleaned-up version of the SDK error on failure — this
+		// is the final outcome, not an intermediate retry, so the user needs
+		// to see it to debug.
+		fmt.Fprintf(os.Stderr, "    SDK ingest FAIL:\n%s", formatIngestErr(waitErr))
 		return fmt.Errorf("ingestion failed: %s", summarizeIngestErr(waitErr))
 	}
 
@@ -223,6 +223,55 @@ func transformCSV(src io.Reader, dst io.Writer, sch *schema.Schema, delim rune) 
 		}
 		row++
 	}
+}
+
+// formatIngestErr builds a human-readable multi-line block from the SDK's
+// statusRecord error. The SDK's default Error() string uses kr/pretty which
+// emits raw byte arrays for UUIDs and dumps every field; we pick the useful
+// ones and skip the noise.
+func formatIngestErr(err error) string {
+	var b strings.Builder
+	b.WriteString("  Ingestion failed:\n")
+	if status, e := azkustoingest.GetIngestionStatus(err); e == nil {
+		fmt.Fprintf(&b, "    Status:        %s\n", status)
+	}
+	if code, e := azkustoingest.GetErrorCode(err); e == nil && code != "" {
+		fmt.Fprintf(&b, "    ErrorCode:     %s\n", code)
+	}
+	if fs, e := azkustoingest.GetIngestionFailureStatus(err); e == nil {
+		fmt.Fprintf(&b, "    FailureStatus: %s\n", fs)
+	}
+	raw := err.Error()
+	for _, field := range []string{"Database", "Table", "UpdatedOn", "Details"} {
+		if v := extractPrettyField(raw, field); v != "" {
+			fmt.Fprintf(&b, "    %-13s %s\n", field+":", v)
+		}
+	}
+	return b.String()
+}
+
+// extractPrettyField pulls one field out of a kr/pretty struct dump. Returns
+// "" if the field isn't present. Handles quoted string values (with the
+// common escape sequences) and bare values; bails on multi-line values.
+func extractPrettyField(s, name string) string {
+	idx := strings.Index(s, name+":")
+	if idx < 0 {
+		return ""
+	}
+	rest := s[idx+len(name)+1:]
+	end := strings.IndexAny(rest, "\r\n")
+	if end < 0 {
+		end = len(rest)
+	}
+	val := strings.TrimSpace(rest[:end])
+	val = strings.TrimRight(val, ",")
+	val = strings.TrimSpace(val)
+	if len(val) >= 2 && val[0] == '"' && val[len(val)-1] == '"' {
+		val = val[1 : len(val)-1]
+		val = strings.ReplaceAll(val, `\"`, `"`)
+		val = strings.ReplaceAll(val, `\\`, `\`)
+	}
+	return val
 }
 
 // summarizeIngestErr extracts the most useful single-line context out of an
