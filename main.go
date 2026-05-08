@@ -222,31 +222,30 @@ func run(cmd *cobra.Command, args []string) error {
 		err error
 	}
 	var failList []failInfo
+	idFmt := fmt.Sprintf("#%%0%dd", len(fmt.Sprint(len(files))))
 
 	for range uploads {
 		msg := <-doneCh
 		u := uploads[msg.idx]
 		dur := time.Since(u.start).Round(100 * time.Millisecond)
+		id := fmt.Sprintf(idFmt, u.index+1)
 
 		if msg.err != nil {
 			failures++
 			if interactive {
-				fmt.Fprintf(os.Stderr, "  FAIL [%d/%d] %s -> %s\n",
-					u.index+1, len(files), u.dn, u.table)
+				fmt.Fprintf(os.Stderr, "  FAIL [%s] %s -> %s\n", id, u.dn, u.table)
 				fmt.Fprintf(os.Stderr, "    %s", ingest.FormatIngestErr(msg.err))
 			} else {
-				fmt.Fprintf(os.Stderr, "  [%d/%d] FAIL %s\n",
-					u.index+1, len(files), ingest.SummarizeIngestErr(msg.err))
+				fmt.Fprintf(os.Stderr, "  [%s] FAIL %s\n", id, ingest.SummarizeIngestErr(msg.err))
 			}
 			failList = append(failList, failInfo{u.dn, msg.err})
 		} else {
 			successes++
 			if interactive {
-				fmt.Fprintf(os.Stderr, "  OK   [%d/%d] %s -> %s  rows=%d  ingested in %s\n",
-					u.index+1, len(files), u.dn, u.table, u.rows, dur)
+				fmt.Fprintf(os.Stderr, "  OK   [%s] %s -> %s  rows=%d  ingested in %s\n",
+					id, u.dn, u.table, u.rows, dur)
 			} else {
-				fmt.Fprintf(os.Stderr, "  [%d/%d] OK %s\n",
-					u.index+1, len(files), dur)
+				fmt.Fprintf(os.Stderr, "  [%s] OK %s\n", id, dur)
 			}
 		}
 	}
