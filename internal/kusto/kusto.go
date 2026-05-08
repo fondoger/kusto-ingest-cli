@@ -15,14 +15,18 @@ import (
 
 type Client struct {
 	data     *azkustodata.Client
-	ingest   *azkustoingest.Managed
+	ingest   *azkustoingest.Ingestion
 	cluster  string
 	database string
 }
 
-// New constructs both a data-plane client (for mgmt commands) and a managed
-// ingestion client. The managed client auto-selects between streaming and
-// queued ingest based on payload size, so the caller doesn't have to decide.
+// New constructs a data-plane client (for mgmt commands) and a queued-only
+// ingestion client. We don't use the managed client because its
+// streaming-first strategy fails permanently on wide schemas (we hit
+// Stream_WrongNumberOfFields when Kusto's streaming CSV parser misinterprets
+// the gzipped payload, and managed only falls back to queued on *transient*
+// errors). Queued ingest is more tolerant of large/wide files and is what we
+// want for bulk loads anyway.
 func New(cluster, database string) (*Client, error) {
 	cluster = normalizeURL(cluster)
 
@@ -33,7 +37,7 @@ func New(cluster, database string) (*Client, error) {
 	}
 
 	kcsbIngest := azkustodata.NewConnectionStringBuilder(cluster).WithAzCli()
-	ingest, err := azkustoingest.NewManaged(kcsbIngest,
+	ingest, err := azkustoingest.New(kcsbIngest,
 		azkustoingest.WithDefaultDatabase(database))
 	if err != nil {
 		_ = data.Close()
@@ -50,7 +54,7 @@ func New(cluster, database string) (*Client, error) {
 
 func (c *Client) Database() string { return c.database }
 
-func (c *Client) Ingestor() *azkustoingest.Managed { return c.ingest }
+func (c *Client) Ingestor() *azkustoingest.Ingestion { return c.ingest }
 
 // Mgmt runs an arbitrary control command. The SDK's kql.Builder requires
 // compile-time string constants for safety; we use AddUnsafe because table /
