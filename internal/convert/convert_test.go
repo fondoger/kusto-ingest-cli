@@ -42,9 +42,22 @@ func TestRowToCSVNonFiniteReal(t *testing.T) {
 func TestRowToCSVQuoting(t *testing.T) {
 	cols := []string{"a", "b", "c", "d"}
 	types := []schema.KustoType{schema.TypeString, schema.TypeString, schema.TypeString, schema.TypeString}
+	// Embedded \n is stripped to a space (Kusto streaming CSV parser doesn't
+	// handle newlines in quoted fields), so the field no longer needs quoting.
 	rec := []string{"plain", "has,comma", `has"quote`, "has\nnewline"}
 	got := string(RowToCSV(cols, types, rec, ','))
-	want := `plain,"has,comma","has""quote","has` + "\n" + `newline"`
+	want := `plain,"has,comma","has""quote",has newline`
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestRowToCSVStripNewlines(t *testing.T) {
+	cols := []string{"a", "b"}
+	types := []schema.KustoType{schema.TypeString, schema.TypeString}
+	rec := []string{"line1\nline2", "windows\r\nstyle"}
+	got := string(RowToCSV(cols, types, rec, ','))
+	want := "line1 line2,windows style"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}

@@ -37,6 +37,13 @@ func sanitize(t schema.KustoType, v string) string {
 	if v == "" {
 		return ""
 	}
+	// Strip embedded CR/LF — Kusto's streaming CSV parser does not handle
+	// newlines inside quoted fields and splits the row at the newline,
+	// causing Stream_WrongNumberOfFields errors. Replace with spaces so
+	// every cell stays on one line.
+	if strings.ContainsAny(v, "\r\n") {
+		v = newlineReplacer.Replace(v)
+	}
 	if t == schema.TypeReal {
 		if f, err := strconv.ParseFloat(v, 64); err == nil {
 			if math.IsNaN(f) || math.IsInf(f, 0) {
@@ -47,8 +54,11 @@ func sanitize(t schema.KustoType, v string) string {
 	return v
 }
 
+var newlineReplacer = strings.NewReplacer("\r\n", " ", "\r", " ", "\n", " ")
+
 func writeCSVField(b *bytes.Buffer, s string, delim rune) {
-	if !strings.ContainsAny(s, "\"\r\n") && !strings.ContainsRune(s, delim) {
+	// After sanitize() strips CR/LF, only `"` and the delimiter need quoting.
+	if !strings.ContainsRune(s, '"') && !strings.ContainsRune(s, delim) {
 		b.WriteString(s)
 		return
 	}
